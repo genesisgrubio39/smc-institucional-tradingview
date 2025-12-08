@@ -1,2 +1,242 @@
-// Módulo BOS / CHOCH institucional v0.1
-// Código será pegado más adelante.
+//@version=6
+indicator("SMC – BOS / CHOCH Institucional (Módulo Estructura)", overlay = true, max_lines_count = 200, max_labels_count = 200)
+
+//----------------------------------------------------
+// 0. PERFIL INSTITUCIONAL (AUTO POR ACTIVO / TF)
+//----------------------------------------------------
+groupPerfil = "0. Perfil institucional BOS / CHOCH"
+
+useAutoPerfil = input.bool(true, "Usar perfil automático", group = groupPerfil)
+tipoActivoManual = input.string("Index / Futuros", "Tipo de activo (manual si desactivas automático)", options = ["Index / Futuros", "Acción / ETF", "FX / Crypto"], group = groupPerfil)
+
+//----------------------------------------------------
+// 1. INPUTS – LÓGICA BOS / CHOCH
+//----------------------------------------------------
+groupLogic = "1. Lógica estructura"
+
+atrLen = input.int(14, "Longitud ATR", minval = 1, group = groupLogic)
+swingLenManual = input.int(5, "Swing length base (manual)", minval = 1, group = groupLogic)
+minAtrFactorManual = input.float(0.6, "Mínimo cierre más allá del swing (x ATR)", step = 0.05, group = groupLogic)
+useDisplacementFilter = input.bool(true, "Exigir desplazamiento mínimo ATR", group = groupLogic)
+
+//----------------------------------------------------
+// 2. INPUTS – DISEÑO LÍNEA + TEXTO
+//----------------------------------------------------
+groupVisual = "2. Diseño BOS / CHOCH"
+
+maxStructs = input.int(40, "Máximo BOS/CHOCH en pantalla", minval = 1, maxval = 200, group = groupVisual)
+
+lineStyleInput = input.string("Sólida", "Estilo de línea", options = ["Sólida", "Punteada", "Discontinua"], group = groupVisual)
+lineWidth = input.int(1, "Grosor línea", minval = 1, maxval = 4, group = groupVisual)
+
+extenderBarras = input.int(20, "Extensión extra derecha (barras)", minval = 0, maxval = 200, group = groupVisual)
+
+labelSize = input.string("small", "Tamaño texto BOS/CHOCH", options = ["tiny", "small", "normal", "large", "huge"], group = groupVisual)
+offsetTicks = input.int(0, "Separación vertical texto (ticks)", minval = 0, maxval = 100, group = groupVisual)
+
+showSwingsDebug = input.bool(false, "Mostrar swings (debug)", group = groupVisual)
+
+bosBullColor = input.color(color.new(color.lime, 0), "Color BOS alcista", group = groupVisual, inline = "bos1")
+bosBearColor = input.color(color.new(color.red, 0), "Color BOS bajista", group = groupVisual, inline = "bos1")
+chochBullColor = input.color(color.new(#00bcd4, 0), "Color CHOCH alcista", group = groupVisual, inline = "choch1")
+chochBearColor = input.color(color.new(#ff9800, 0), "Color CHOCH bajista", group = groupVisual, inline = "choch1")
+
+//----------------------------------------------------
+// 3. FUNCIONES AUXILIARES
+//----------------------------------------------------
+f_getLineStyle(str)=>
+    ls = line.style_solid
+    if str == "Punteada"
+        ls := line.style_dotted
+    else if str == "Discontinua"
+        ls := line.style_dashed
+    ls
+
+f_getLabelSize(str)=>
+    s = size.small
+    if str == "tiny"
+        s := size.tiny
+    else if str == "normal"
+        s := size.normal
+    else if str == "large"
+        s := size.large
+    else if str == "huge"
+        s := size.huge
+    s
+
+//----------------------------------------------------
+// 4. PARÁMETROS FINALES SEGÚN PERFIL
+//----------------------------------------------------
+int swingLenPerfil = swingLenManual
+float minAtrFactorPerfil = minAtrFactorManual
+
+tfSec = timeframe.in_seconds()
+
+if useAutoPerfil
+    string claseAuto = "Index / Futuros"
+    if syminfo.type == "stock"
+        claseAuto := "Acción / ETF"
+    else if syminfo.type == "forex" or syminfo.type == "crypto"
+        claseAuto := "FX / Crypto"
+    if tfSec >= 86400
+        swingLenPerfil := claseAuto == "Index / Futuros" ? 3 : 4
+        minAtrFactorPerfil := 0.5
+    else if tfSec >= 3600
+        swingLenPerfil := claseAuto == "Index / Futuros" ? 4 : 5
+        minAtrFactorPerfil := 0.6
+    else if tfSec >= 900
+        swingLenPerfil := claseAuto == "Index / Futuros" ? 5 : 6
+        minAtrFactorPerfil := 0.7
+    else
+        swingLenPerfil := claseAuto == "Index / Futuros" ? 6 : 7
+        minAtrFactorPerfil := 0.8
+else
+    if tipoActivoManual == "Index / Futuros"
+        if tfSec >= 86400
+            swingLenPerfil := 3
+            minAtrFactorPerfil := 0.5
+        else if tfSec >= 3600
+            swingLenPerfil := 4
+            minAtrFactorPerfil := 0.6
+        else if tfSec >= 900
+            swingLenPerfil := 5
+            minAtrFactorPerfil := 0.7
+        else
+            swingLenPerfil := 6
+            minAtrFactorPerfil := 0.8
+    else if tipoActivoManual == "Acción / ETF"
+        if tfSec >= 86400
+            swingLenPerfil := 4
+            minAtrFactorPerfil := 0.55
+        else if tfSec >= 3600
+            swingLenPerfil := 5
+            minAtrFactorPerfil := 0.65
+        else if tfSec >= 900
+            swingLenPerfil := 6
+            minAtrFactorPerfil := 0.75
+        else
+            swingLenPerfil := 7
+            minAtrFactorPerfil := 0.85
+    else
+        if tfSec >= 86400
+            swingLenPerfil := 3
+            minAtrFactorPerfil := 0.6
+        else if tfSec >= 3600
+            swingLenPerfil := 4
+            minAtrFactorPerfil := 0.7
+        else if tfSec >= 900
+            swingLenPerfil := 5
+            minAtrFactorPerfil := 0.8
+        else
+            swingLenPerfil := 6
+            minAtrFactorPerfil := 0.9
+
+lineStyle = f_getLineStyle(lineStyleInput)
+labelSizeFinal = f_getLabelSize(labelSize)
+
+atrVal = ta.atr(atrLen)
+tick = syminfo.mintick
+
+//----------------------------------------------------
+// 5. SWINGS Y TENDENCIA
+//----------------------------------------------------
+ph = ta.pivothigh(high,swingLenPerfil,swingLenPerfil)
+pl = ta.pivotlow(low,swingLenPerfil,swingLenPerfil)
+
+var float lastSwingHigh = na
+var float lastSwingLow  = na
+var int   lastSwingHighIndex = na
+var int   lastSwingLowIndex  = na
+var int   trendDir = 0  // 1 alcista, -1 bajista, 0 neutro
+
+if not na(ph)
+    lastSwingHigh := ph
+    lastSwingHighIndex := bar_index - swingLenPerfil
+
+if not na(pl)
+    lastSwingLow := pl
+    lastSwingLowIndex := bar_index - swingLenPerfil
+
+plotshape(showSwingsDebug and not na(ph),title="Swing High",style=shape.triangledown,location=location.abovebar,size=size.tiny,color=color.new(color.red,0))
+plotshape(showSwingsDebug and not na(pl),title="Swing Low",style=shape.triangleup,location=location.belowbar,size=size.tiny,color=color.new(color.lime,0))
+
+//----------------------------------------------------
+// 6. ARRAYS PARA LÍNEAS Y TEXTOS
+//----------------------------------------------------
+var line[]  structLines  = array.new_line()
+var label[] structLabels = array.new_label()
+
+f_pushStruct(line ln,label lb)=>
+    array.push(structLines,ln)
+    array.push(structLabels,lb)
+    if array.size(structLines) > maxStructs
+        line oldLn = array.shift(structLines)
+        label oldLb = array.shift(structLabels)
+        line.delete(oldLn)
+        label.delete(oldLb)
+
+//----------------------------------------------------
+// 7. LÓGICA DE RUPTURA BOS / CHOCH
+//----------------------------------------------------
+var bool  bullBreak       = false
+var bool  bearBreak       = false
+var float breakLevel      = na
+var int   breakLeftIndex  = na
+var int   breakRightIndex = na
+var bool  breakIsBull     = false
+var bool  breakIsChoch    = false
+
+bullBreak       := false
+bearBreak       := false
+breakLevel      := na
+breakLeftIndex  := na
+breakRightIndex := na
+breakIsBull     := false
+breakIsChoch    := false
+
+// Ruptura alcista
+if not na(lastSwingHigh) and not na(lastSwingHighIndex)
+    bool firstCloseAbove   = close > lastSwingHigh and close[1] <= lastSwingHigh
+    bool desplazamientoOk  = not useDisplacementFilter or (close - lastSwingHigh >= minAtrFactorPerfil * atrVal)
+    if firstCloseAbove and desplazamientoOk
+        bullBreak       := true
+        breakLevel      := lastSwingHigh
+        breakLeftIndex  := lastSwingHighIndex
+        breakRightIndex := bar_index
+        breakIsBull     := true
+        breakIsChoch    := trendDir == -1 or trendDir == 0
+        trendDir        := 1
+
+// Ruptura bajista
+if not na(lastSwingLow) and not na(lastSwingLowIndex)
+    bool firstCloseBelow   = close < lastSwingLow and close[1] >= lastSwingLow
+    bool desplazamientoOk2 = not useDisplacementFilter or (lastSwingLow - close >= minAtrFactorPerfil * atrVal)
+    if firstCloseBelow and desplazamientoOk2
+        bearBreak       := true
+        breakLevel      := lastSwingLow
+        breakLeftIndex  := lastSwingLowIndex
+        breakRightIndex := bar_index
+        breakIsBull     := false
+        breakIsChoch    := trendDir == 1 or trendDir == 0
+        trendDir        := -1
+
+//----------------------------------------------------
+// 8. DIBUJO BOS / CHOCH SOLO ENTRE SWING Y RUPTURA
+//----------------------------------------------------
+if bullBreak or bearBreak
+    bool   esBull  = breakIsBull
+    bool   esChoch = breakIsChoch
+    string tag     = esChoch ? "CHOCH" : "BOS"
+
+    color txtColor = esChoch ? (esBull ? chochBullColor : chochBearColor) : (esBull ? bosBullColor : bosBearColor)
+
+    int   x1      = breakLeftIndex
+    int   x2      = breakRightIndex
+    float y       = breakLevel
+    int   xLabel  = math.round(0.5 * (x1 + x2))
+    float yText   = esBull ? y + offsetTicks * tick : y - offsetTicks * tick
+
+    line  ln = line.new(x1,y,x2,y,xloc=xloc.bar_index,extend=extend.none,color=txtColor,width=lineWidth,style=lineStyle)
+    label lb = label.new(xLabel,yText,tag,xloc=xloc.bar_index,style=label.style_label_center,textcolor=txtColor,color=color.new(color.black,100),size=labelSizeFinal)
+
+    f_pushStruct(ln,lb)
