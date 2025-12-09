@@ -1,2 +1,783 @@
-// Módulo Liquidez institucional v0.1
-// Código será pegado más adelante.
+//@version=6
+indicator("SMC – Pools / Sweeps Institucional (Módulo Liquidez)", overlay = true, max_lines_count = 300, max_labels_count = 300)
+
+//----------------------------------------------------
+// PERFIL INSTITUCIONAL POR ACTIVO
+//----------------------------------------------------
+groupPerfil = "Perfil institucional"
+
+useAutoPerfil = input.bool(true, "Usar perfil automático", group = groupPerfil)
+tipoActivoManual = input.string("Index / Futuros", "Tipo de activo (manual si desactivas automático)", options = ["Index / Futuros", "MegaCap / ETF", "Acción normal", "SmallCap / Baja liquidez", "FX / Crypto"], group = groupPerfil)
+
+//----------------------------------------------------
+// INPUTS – LÓGICA BASE
+//----------------------------------------------------
+groupEq      = "EQH / EQL"
+groupSwing   = "Swings estructura (HH/HL/LH/LL)"
+groupDay     = "High/Low Diario"
+groupSweep   = "Sweeps"
+groupFiltros = "Filtros institucionales"
+groupSesion  = "Sesiones / Kill zones"
+groupScore   = "Score de sweeps"
+groupColor   = "Colores etiquetas"
+groupTxt     = "Tamaño / offset texto"
+groupDisp    = "Displacement"
+groupImb     = "Imbalance (delta proxy)"
+groupStats   = "Métricas de sweeps (calibración)"
+groupCvd     = "CVD institucional"
+groupStructFilt = "Filtros estructura institucional"
+
+// ATR
+atrLen = input.int(14, "Longitud ATR", minval = 1)
+
+// EQH / EQL
+atrTolManual  = input.float(0.10, "Tolerancia EQH/EQL (x ATR)", step = 0.05, minval = 0.05, maxval = 1.0, group = groupEq)
+eqLookback    = input.int(60, "Barras lookback pivots EQ", minval = 10, maxval = 500, group = groupEq)
+eqMaxBarsDist = input.int(60, "Máx barras entre pivots EQ", minval = 5, maxval = 500, group = groupEq)
+
+// Swings estructura
+swLenManual    = input.int(7, "Longitud swing pivots", minval = 1, maxval = 20, group = groupSwing)
+showHighStruct = input.bool(true, "Mostrar estructura en máximos (HH/LH)", group = groupSwing)
+showLowStruct  = input.bool(true, "Mostrar estructura en mínimos (HL/LL)", group = groupSwing)
+
+// Filtro institucional extra para estructura
+useStructAtrFilter = input.bool(true, "Filtrar HH/HL/LH/LL por ATR", group = groupStructFilt)
+structAtrFactor    = input.float(0.8, "Distancia mínima entre swings (x ATR)", step = 0.1, minval = 0.1, group = groupStructFilt)
+minBarsStruct      = input.int(8, "Barras mínimas entre estructuras", minval = 1, group = groupStructFilt)
+
+// High/Low diario
+useDayHL = input.bool(true, "Mostrar High/Low diario actual (HL)", group = groupDay)
+
+// Sweeps básicos
+useSweeps     = input.bool(true, "Detectar sweeps sobre niveles", group = groupSweep)
+minWickManual = input.float(0.35, "Mínimo wick / rango para sweep retorno", step = 0.05, minval = 0.0, maxval = 1.0, group = groupSweep)
+useVolFilter  = input.bool(true, "Filtrar por volumen percentil", group = groupSweep)
+volLen        = input.int(120, "Lookback volumen percentil", minval = 20, maxval = 300, group = groupSweep)
+volPercManual = input.float(75.0, "Percentil mínimo volumen (0–100)", step = 1.0, minval = 0.0, maxval = 100.0, group = groupSweep)
+
+// Filtros institucionales adicionales
+minBarsEq        = input.int(20, "Mínimo barras entre pivots EQ", minval = 1, maxval = 500, group = groupFiltros)
+maxLiqLevels     = input.int(10, "Máx niveles de liquidez activos", minval = 1, maxval = 100, group = groupFiltros)
+useHLAsLiquidity = input.bool(false, "Usar HL diario anterior como liquidez para sweeps", group = groupFiltros)
+liqTouchTolAtr   = input.float(0.25, "Tolerancia toque nivel (x ATR)", step = 0.05, minval = 0.05, maxval = 1.0, group = groupFiltros)
+liqAgeBars1      = input.int(100, "Edad nivel – umbral 1 (barras)", minval = 1, maxval = 5000, group = groupFiltros)
+liqAgeBars2      = input.int(300, "Edad nivel – umbral 2 (barras)", minval = 1, maxval = 10000, group = groupFiltros)
+liqMinScore      = input.int(2, "Score mínimo del pool para sumar puntos", minval = 0, maxval = 10, group = groupFiltros)
+
+// Sesiones / kill zones
+useSessionFilter     = input.bool(true, "Usar filtro de sesión", group = groupSesion)
+onlySweepsInSessions = input.bool(false, "Sólo sweeps dentro de sesiones", group = groupSesion)
+markOutSession       = input.bool(true, "Marcar sweeps fuera de sesión con baja prioridad", group = groupSesion)
+session1             = input.session("0200-0500", "Sesión 1 (ej. London)", group = groupSesion)
+session2             = input.session("0830-1030", "Sesión 2 (ej. NY cash índices)", group = groupSesion)
+
+// Score de sweeps
+useSweepScore = input.bool(true, "Usar sistema de score para sweeps", group = groupScore)
+sweepScoreMin = input.int(2, "Score mínimo para marcar sweep", minval = 0, maxval = 10, group = groupScore)
+
+// Colores de etiquetas
+eqhTextColor = input.color(color.red, "Color texto EQH", group = groupColor)
+eqlTextColor = input.color(color.teal, "Color texto EQL", group = groupColor)
+hhTextColor  = input.color(color.red, "Color texto HH", group = groupColor)
+hlTextColor  = input.color(color.teal, "Color texto HL", group = groupColor)
+lhTextColor  = input.color(color.orange, "Color texto LH", group = groupColor)
+llTextColor  = input.color(color.new(color.teal, 0), "Color texto LL", group = groupColor)
+swRTextColor = input.color(color.lime, "Color texto SwR", group = groupColor)
+swCTextColor = input.color(color.red, "Color texto SwC", group = groupColor)
+
+// Tamaño y offset texto
+txtSizeStructOpt = input.string("small", "Tamaño texto estructura (EQ/HH/HL...)", options = ["tiny", "small", "normal", "large"], group = groupTxt)
+txtSizeSweepOpt  = input.string("tiny", "Tamaño texto sweeps (SwR/SwC)", options = ["tiny", "small", "normal", "large"], group = groupTxt)
+offsetSweepAtr   = input.float(0.15, "Offset vertical sweeps (x ATR)", step = 0.05, minval = 0.0, maxval = 2.0, group = groupTxt)
+
+// Displacement
+useDispFilter = input.bool(true, "Exigir vela de displacement", group = groupDisp)
+dispLen       = input.int(20, "Lookback media rango/cuerpo", minval = 5, maxval = 200, group = groupDisp)
+dispRangeMult = input.float(1.5, "Mín rango / media", step = 0.1, minval = 1.0, maxval = 5.0, group = groupDisp)
+dispBodyMult  = input.float(1.5, "Mín cuerpo / media", step = 0.1, minval = 1.0, maxval = 5.0, group = groupDisp)
+
+// Imbalance
+useImbFilter = input.bool(true, "Usar filtro de desequilibrio (imbalance)", group = groupImb)
+imbLen       = input.int(50, "Lookback imbalance", minval = 10, maxval = 300, group = groupImb)
+imbZMin      = input.float(1.5, "Z-score mínimo imbalance", step = 0.1, minval = 0.5, maxval = 5.0, group = groupImb)
+
+// Métricas de sweeps
+useStats              = input.bool(true, "Activar métricas de sweeps", group = groupStats)
+maxBarsHold           = input.int(20, "Máx barras a evaluar por sweep", minval = 1, maxval = 300, group = groupStats)
+statsScoreMin         = input.int(0, "Score mínimo para incluir en estadísticas", minval = 0, maxval = 10, group = groupStats)
+statsOnlyMainSession  = input.bool(true, "Sólo sweeps en sesión principal", group = groupStats)
+statsSweepType        = input.string("Ambos", "Tipo de sweep a medir", options = ["Ambos", "Sólo SwR", "Sólo SwC"], group = groupStats)
+maxStatsSweeps        = input.int(500, "Máx sweeps guardados para estadísticas", minval = 50, maxval = 2000, group = groupStats)
+
+// CVD institucional
+useSesionRTH = input.bool(true, "Reset CVD por sesión RTH", group = groupCvd)
+sesionRTH    = input.session("0930-1600", "Horario RTH", group = groupCvd)
+lenTrend     = input.int(20, "Longitud tendencia Precio/CVD", minval = 5, group = groupCvd)
+
+//----------------------------------------------------
+f_labelSize(string opt) =>
+    opt == "tiny" ? size.tiny : opt == "normal" ? size.normal : opt == "large" ? size.large : size.small
+
+labelSizeStruct = f_labelSize(txtSizeStructOpt)
+labelSizeSweep  = f_labelSize(txtSizeSweepOpt)
+
+//----------------------------------------------------
+// PERFIL AUTOMÁTICO DETECTADO (ACTIVO)
+//----------------------------------------------------
+float avgDollarVol = ta.sma(close * volume, 50)
+
+string tipoDetectado = "Acción normal"
+if syminfo.type == "futures" or syminfo.type == "index"
+    tipoDetectado := "Index / Futuros"
+else if syminfo.type == "forex" or syminfo.type == "crypto"
+    tipoDetectado := "FX / Crypto"
+else if syminfo.type == "stock" or syminfo.type == "fund"
+    if avgDollarVol > 5e8
+        tipoDetectado := "MegaCap / ETF"
+    else if avgDollarVol < 2e7
+        tipoDetectado := "SmallCap / Baja liquidez"
+
+string tipoActivoEfectivo = useAutoPerfil ? tipoDetectado : tipoActivoManual
+
+float perfilAtrTol  = 0.10
+int   perfilSwLen   = 7
+float perfilMinWick = 0.35
+float perfilVolPerc = 75.0
+
+if tipoActivoEfectivo == "Index / Futuros"
+    perfilAtrTol := 0.10
+    perfilSwLen := 7
+    perfilMinWick := 0.35
+    perfilVolPerc := 75.0
+else if tipoActivoEfectivo == "MegaCap / ETF"
+    perfilAtrTol := 0.12
+    perfilSwLen := 6
+    perfilMinWick := 0.32
+    perfilVolPerc := 70.0
+else if tipoActivoEfectivo == "Acción normal"
+    perfilAtrTol := 0.15
+    perfilSwLen := 5
+    perfilMinWick := 0.30
+    perfilVolPerc := 65.0
+else if tipoActivoEfectivo == "SmallCap / Baja liquidez"
+    perfilAtrTol := 0.18
+    perfilSwLen := 4
+    perfilMinWick := 0.28
+    perfilVolPerc := 60.0
+else if tipoActivoEfectivo == "FX / Crypto"
+    perfilAtrTol := 0.20
+    perfilSwLen := 9
+    perfilMinWick := 0.32
+    perfilVolPerc := 70.0
+
+float atrTol = useAutoPerfil ? perfilAtrTol : atrTolManual
+int   swLen  = useAutoPerfil ? perfilSwLen  : swLenManual
+
+//----------------------------------------------------
+// PERFIL AUTOMÁTICO POR TIMEFRAME
+//----------------------------------------------------
+int tfSec = timeframe.in_seconds(timeframe.period)
+bool tfIntradia = tfSec <= 60 * 60
+bool tfSwing    = tfSec > 60 * 60 and tfSec <= 60 * 60 * 4
+bool tfHigher   = tfSec > 60 * 60 * 4
+
+float perfilMinWickTF       = perfilMinWick
+float perfilVolPercTF       = perfilVolPerc
+int   perfilLiqScoreMinTF   = liqMinScore
+int   perfilSweepScoreMinTF = sweepScoreMin
+int   perfilMinBarsEqTF     = minBarsEq
+int   perfilMaxLiqLevelsTF  = maxLiqLevels
+
+if tipoActivoEfectivo == "Index / Futuros"
+    if tfIntradia
+        perfilMinWickTF := 0.28
+        perfilVolPercTF := 65.0
+        perfilLiqScoreMinTF := 1
+        perfilSweepScoreMinTF := 1
+        perfilMinBarsEqTF := 15
+        perfilMaxLiqLevelsTF := 12
+    else if tfSwing
+        perfilMinWickTF := 0.32
+        perfilVolPercTF := 70.0
+        perfilLiqScoreMinTF := 2
+        perfilSweepScoreMinTF := 2
+        perfilMinBarsEqTF := 20
+        perfilMaxLiqLevelsTF := 10
+    else if tfHigher
+        perfilMinWickTF := 0.35
+        perfilVolPercTF := 75.0
+        perfilLiqScoreMinTF := 2
+        perfilSweepScoreMinTF := 2
+        perfilMinBarsEqTF := 25
+        perfilMaxLiqLevelsTF := 8
+else if tipoActivoEfectivo == "MegaCap / ETF"
+    if tfIntradia
+        perfilMinWickTF := 0.26
+        perfilVolPercTF := 65.0
+        perfilLiqScoreMinTF := 1
+        perfilSweepScoreMinTF := 1
+        perfilMinBarsEqTF := 15
+        perfilMaxLiqLevelsTF := 10
+    else if tfSwing
+        perfilMinWickTF := 0.30
+        perfilVolPercTF := 68.0
+        perfilLiqScoreMinTF := 2
+        perfilSweepScoreMinTF := 2
+        perfilMinBarsEqTF := 20
+        perfilMaxLiqLevelsTF := 9
+    else if tfHigher
+        perfilMinWickTF := 0.33
+        perfilVolPercTF := 72.0
+        perfilLiqScoreMinTF := 2
+        perfilSweepScoreMinTF := 2
+        perfilMinBarsEqTF := 25
+        perfilMaxLiqLevelsTF := 8
+else if tipoActivoEfectivo == "SmallCap / Baja liquidez"
+    if tfIntradia
+        perfilMinWickTF := 0.30
+        perfilVolPercTF := 60.0
+        perfilLiqScoreMinTF := 1
+        perfilSweepScoreMinTF := 1
+        perfilMinBarsEqTF := 12
+        perfilMaxLiqLevelsTF := 8
+    else
+        perfilMinWickTF := 0.32
+        perfilVolPercTF := 60.0
+        perfilLiqScoreMinTF := 2
+        perfilSweepScoreMinTF := 2
+        perfilMinBarsEqTF := 18
+        perfilMaxLiqLevelsTF := 7
+else if tipoActivoEfectivo == "FX / Crypto"
+    if tfIntradia
+        perfilMinWickTF := perfilMinWick
+        perfilVolPercTF := perfilVolPerc
+        perfilLiqScoreMinTF := 2
+        perfilSweepScoreMinTF := 2
+        perfilMinBarsEqTF := 25
+        perfilMaxLiqLevelsTF := maxLiqLevels
+    else
+        perfilMinWickTF := perfilMinWick
+        perfilVolPercTF := perfilVolPerc
+        perfilLiqScoreMinTF := liqMinScore
+        perfilSweepScoreMinTF := sweepScoreMin
+        perfilMinBarsEqTF := minBarsEq
+        perfilMaxLiqLevelsTF := maxLiqLevels
+
+float minWickFrac = useAutoPerfil ? perfilMinWickTF : minWickManual
+float volPercMin  = useAutoPerfil ? perfilVolPercTF : volPercManual
+int   liqMinScoreEff   = useAutoPerfil ? perfilLiqScoreMinTF   : liqMinScore
+int   sweepScoreMinEff = useAutoPerfil ? perfilSweepScoreMinTF : sweepScoreMin
+int   minBarsEqEff     = useAutoPerfil ? perfilMinBarsEqTF     : minBarsEq
+int   maxLiqLevelsEff  = useAutoPerfil ? perfilMaxLiqLevelsTF  : maxLiqLevels
+
+//----------------------------------------------------
+float atr = ta.atr(atrLen)
+
+// Volumen percentil
+var float volThreshold = na
+if useVolFilter
+    float[] tempArr = array.new_float(0)
+    for i = 0 to volLen - 1
+        if not na(volume[i])
+            array.push(tempArr, volume[i])
+    if array.size(tempArr) > 0
+        array.sort(tempArr)
+        int idxVol = math.round((volPercMin / 100.0) * (array.size(tempArr) - 1))
+        idxVol := math.max(math.min(idxVol, array.size(tempArr) - 1), 0)
+        volThreshold := array.get(tempArr, idxVol)
+else
+    volThreshold := na
+
+// Sesiones
+bool inSess1       = not na(time(timeframe.period, session1))
+bool inSess2       = not na(time(timeframe.period, session2))
+bool inMainSession = inSess1 or inSess2
+
+// Imbalance (delta proxy)
+float signedVol  = close > open ? volume : close < open ? -volume : 0.0
+float body       = math.abs(close - open)
+float rng        = high - low
+float weight     = rng > 0 ? body / rng : 0.0
+float deltaProxy = signedVol * weight
+float imbSeries  = volume > 0 ? deltaProxy / volume : 0.0
+float imbMean    = ta.sma(imbSeries, imbLen)
+float imbStd     = ta.stdev(imbSeries, imbLen)
+float imbZ       = imbStd > 0 ? math.abs(imbSeries - imbMean) / imbStd : 0.0
+bool  imbExtreme = useImbFilter and imbZ >= imbZMin
+
+// Displacement
+float avgRange   = ta.sma(high - low, dispLen)
+float avgBody    = ta.sma(math.abs(close - open), dispLen)
+bool  dispCandle = avgRange > 0 and avgBody > 0 and (high - low) >= avgRange * dispRangeMult and math.abs(close - open) >= avgBody * dispBodyMult
+
+//----------------------------------------------------
+// CVD INSTITUCIONAL
+//----------------------------------------------------
+int  tRTH      = time(timeframe.period, sesionRTH)
+bool inRTH     = not na(tRTH)
+bool inicioRTH = inRTH and (na(tRTH[1]) or tRTH < tRTH[1])
+
+var float cvd = na
+bool  hasPrevClose = not na(close[1])
+float deltaBarRaw  = hasPrevClose ? (close > close[1] ? volume : close < close[1] ? -volume : 0.0) : 0.0
+float deltaBar     = useSesionRTH ? (inRTH ? deltaBarRaw : 0.0) : deltaBarRaw
+
+bool cambioDia = dayofmonth != dayofmonth[1]
+bool condReset = useSesionRTH ? inicioRTH : cambioDia
+
+cvd := condReset or na(cvd[1]) ? deltaBar : cvd[1] + deltaBar
+
+float prNow2      = ta.linreg(close, lenTrend, 0)
+float prPrev2     = ta.linreg(close, lenTrend, 1)
+float slopePrice  = prNow2 - prPrev2
+
+float cvdNow      = ta.linreg(cvd, lenTrend, 0)
+float cvdPrev     = ta.linreg(cvd, lenTrend, 1)
+float slopeCvd    = cvdNow - cvdPrev
+
+bool upPrice   = slopePrice > 0
+bool downPrice = slopePrice < 0
+bool upCvd     = slopeCvd > 0
+bool downCvd   = slopeCvd < 0
+
+bool bullTrend = upPrice and upCvd
+bool bearTrend = downPrice and downCvd
+bool distrib   = upPrice and not upCvd
+bool acumul    = downPrice and not downCvd
+
+//----------------------------------------------------
+// PIVOTS SWING HIGH / LOW
+//----------------------------------------------------
+float phPrice = ta.pivothigh(high, swLen, swLen)
+float plPrice = ta.pivotlow(low, swLen, swLen)
+
+bool isSwingHigh = not na(phPrice)
+bool isSwingLow  = not na(plPrice)
+
+int phBar = isSwingHigh ? bar_index - swLen : na
+int plBar = isSwingLow  ? bar_index - swLen : na
+
+//----------------------------------------------------
+// ARRAYS DE PIVOTS PARA EQH/EQL
+//----------------------------------------------------
+var float[] swingHighPrices = array.new_float()
+var int[]   swingHighBars   = array.new_int()
+var float[] swingLowPrices  = array.new_float()
+var int[]   swingLowBars    = array.new_int()
+
+if isSwingHigh
+    array.push(swingHighPrices, phPrice)
+    array.push(swingHighBars, phBar)
+    if array.size(swingHighPrices) > eqLookback
+        array.shift(swingHighPrices)
+        array.shift(swingHighBars)
+
+if isSwingLow
+    array.push(swingLowPrices, plPrice)
+    array.push(swingLowBars, plBar)
+    if array.size(swingLowPrices) > eqLookback
+        array.shift(swingLowPrices)
+        array.shift(swingLowBars)
+
+//----------------------------------------------------
+// ARRAYS DE LIQUIDEZ
+//----------------------------------------------------
+var float[] liqPrices     = array.new_float()
+var int[]   liqDir        = array.new_int()
+var bool[]  liqUsed       = array.new_bool()
+var int[]   liqBaseScore  = array.new_int()
+var int[]   liqCreatedBar = array.new_int()
+var int[]   liqTouches    = array.new_int()
+var float[] liqRefCvd     = array.new_float()
+
+liq_register(float price, int dir, int baseScore, float refCvd) =>
+    array.push(liqPrices, price)
+    array.push(liqDir, dir)
+    array.push(liqUsed, false)
+    array.push(liqBaseScore, baseScore)
+    array.push(liqCreatedBar, bar_index)
+    array.push(liqTouches, 0)
+    array.push(liqRefCvd, refCvd)
+    if array.size(liqPrices) > maxLiqLevelsEff
+        array.shift(liqPrices)
+        array.shift(liqDir)
+        array.shift(liqUsed)
+        array.shift(liqBaseScore)
+        array.shift(liqCreatedBar)
+        array.shift(liqTouches)
+        array.shift(liqRefCvd)
+
+liq_getScore(int i) =>
+    int base       = array.get(liqBaseScore, i)
+    int touches    = array.get(liqTouches, i)
+    int created    = array.get(liqCreatedBar, i)
+    int ageBars    = bar_index - created
+    int ageBonus   = ageBars >= liqAgeBars2 ? 2 : ageBars >= liqAgeBars1 ? 1 : 0
+    int touchBonus = touches >= 3 ? 2 : touches == 2 ? 1 : 0
+    base + ageBonus + touchBonus
+
+//----------------------------------------------------
+// EQH / EQL CON FILTRO CVD
+//----------------------------------------------------
+if isSwingHigh
+    float atrPivot = atr[swLen]
+    int idxH = array.size(swingHighPrices) - 2
+    bool foundEqH = false
+    while idxH >= 0 and not foundEqH
+        float prevPriceH = array.get(swingHighPrices, idxH)
+        int   prevBarH   = array.get(swingHighBars, idxH)
+        int   barDistH   = math.abs(phBar - prevBarH)
+        bool  isEqH      = barDistH >= minBarsEqEff and barDistH <= eqMaxBarsDist and math.abs(phPrice - prevPriceH) <= atrTol * atrPivot
+        bool  okDistrib  = distrib or bearTrend
+        if isEqH and okDistrib
+            line.new(prevBarH, prevPriceH, phBar, phPrice, xloc = xloc.bar_index, extend = extend.none, color = color.new(color.red, 0), style = line.style_dotted, width = 1)
+            int   midBarH   = math.round((prevBarH + phBar) * 0.5)
+            float midPriceH = (prevPriceH + phPrice) * 0.5
+            float labelYH   = midPriceH + atr * 0.05
+            label.new(midBarH, labelYH, "EQH", xloc = xloc.bar_index, yloc = yloc.price, textcolor = eqhTextColor, style = label.style_label_center, size = labelSizeStruct, color = color.new(color.black, 100))
+            liq_register((prevPriceH + phPrice) * 0.5, 1, 2, cvd)
+            foundEqH := true
+        idxH -= 1
+
+if isSwingLow
+    float atrPivotL = atr[swLen]
+    int idxL = array.size(swingLowPrices) - 2
+    bool foundEqL = false
+    while idxL >= 0 and not foundEqL
+        float prevPriceL = array.get(swingLowPrices, idxL)
+        int   prevBarL   = array.get(swingLowBars, idxL)
+        int   barDistL   = math.abs(plBar - prevBarL)
+        bool  isEqL      = barDistL >= minBarsEqEff and barDistL <= eqMaxBarsDist and math.abs(plPrice - prevPriceL) <= atrTol * atrPivotL
+        bool  okAcum     = acumul or bullTrend
+        if isEqL and okAcum
+            line.new(prevBarL, prevPriceL, plBar, plPrice, xloc = xloc.bar_index, extend = extend.none, color = color.new(color.teal, 0), style = line.style_dotted, width = 1)
+            int   midBarL   = math.round((prevBarL + plBar) * 0.5)
+            float midPriceL = (prevPriceL + plPrice) * 0.5
+            float labelYL   = midPriceL - atr * 0.05
+            label.new(midBarL, labelYL, "EQL", xloc = xloc.bar_index, yloc = yloc.price, textcolor = eqlTextColor, style = label.style_label_center, size = labelSizeStruct, color = color.new(color.black, 100))
+            liq_register((prevPriceL + plPrice) * 0.5, -1, 2, cvd)
+            foundEqL := true
+        idxL -= 1
+
+//----------------------------------------------------
+// ESTRUCTURA HH / HL / LH / LL CON FILTRO ATR
+//----------------------------------------------------
+var float lastSwingHighPrice = na
+var float lastSwingLowPrice  = na
+var float lastStructHigh = na
+var int   lastStructHighBar = na
+var float lastStructLow  = na
+var int   lastStructLowBar = na
+
+if showHighStruct and isSwingHigh
+    bool passHigh = true
+    if useStructAtrFilter and not na(lastStructHigh)
+        float distAtr = math.abs(phPrice - lastStructHigh) / atr
+        int   barsGap = bar_index - lastStructHighBar
+        passHigh := distAtr >= structAtrFactor and barsGap >= minBarsStruct
+    if passHigh
+        string highLabel = "HH"
+        if not na(lastSwingHighPrice)
+            highLabel := phPrice > lastSwingHighPrice ? "HH" : "LH"
+        color highColor = highLabel == "HH" ? hhTextColor : lhTextColor
+        float labelYhigh = phPrice + atr * 0.05
+        label.new(phBar, labelYhigh, highLabel, xloc = xloc.bar_index, yloc = yloc.price, textcolor = highColor, style = label.style_label_center, size = labelSizeStruct, color = color.new(color.black, 100))
+        lastSwingHighPrice := phPrice
+        lastStructHigh := phPrice
+        lastStructHighBar := bar_index
+
+if showLowStruct and isSwingLow
+    bool passLow = true
+    if useStructAtrFilter and not na(lastStructLow)
+        float distAtrL = math.abs(plPrice - lastStructLow) / atr
+        int   barsGapL = bar_index - lastStructLowBar
+        passLow := distAtrL >= structAtrFactor and barsGapL >= minBarsStruct
+    if passLow
+        string lowLabel = "LL"
+        if not na(lastSwingLowPrice)
+            lowLabel := plPrice > lastSwingLowPrice ? "HL" : "LL"
+        color lowColor = lowLabel == "HL" ? hlTextColor : llTextColor
+        float labelYlow = plPrice - atr * 0.05
+        label.new(plBar, labelYlow, lowLabel, xloc = xloc.bar_index, yloc = yloc.price, textcolor = lowColor, style = label.style_label_center, size = labelSizeStruct, color = color.new(color.black, 100))
+        lastSwingLowPrice := plPrice
+        lastStructLow := plPrice
+        lastStructLowBar := bar_index
+
+//----------------------------------------------------
+// HIGH / LOW DIARIO – LÍNEAS HL
+//----------------------------------------------------
+var float dayHigh = na
+var float dayLow  = na
+var int   dayStartBar = na
+var float prevDayHigh = na
+var float prevDayLow  = na
+
+var line  dayHighLine = na
+var line  dayLowLine  = na
+var label dayHighLab  = na
+var label dayLowLab   = na
+
+bool isNewDay = ta.change(time("D")) != 0
+
+if isNewDay
+    prevDayHigh := dayHigh
+    prevDayLow  := dayLow
+    if useHLAsLiquidity and not na(prevDayHigh) and not na(prevDayLow)
+        liq_register(prevDayHigh, 1, 1, cvd)
+        liq_register(prevDayLow, -1, 1, cvd)
+    dayHigh := high
+    dayLow  := low
+    dayStartBar := bar_index
+    if useDayHL
+        if not na(dayHighLine)
+            line.delete(dayHighLine)
+            label.delete(dayHighLab)
+        if not na(dayLowLine)
+            line.delete(dayLowLine)
+            label.delete(dayLowLab)
+        dayHighLine := line.new(dayStartBar, dayHigh, bar_index, dayHigh, xloc = xloc.bar_index, extend = extend.right, color = color.new(color.white, 70), style = line.style_dotted, width = 1)
+        dayLowLine  := line.new(dayStartBar, dayLow, bar_index, dayLow, xloc = xloc.bar_index, extend = extend.right, color = color.new(color.white, 70), style = line.style_dotted, width = 1)
+        dayHighLab  := label.new(dayStartBar, dayHigh, "HL", xloc = xloc.bar_index, yloc = yloc.price, textcolor = color.new(color.teal, 0), style = label.style_label_left, size = size.tiny, color = color.new(color.black, 100))
+        dayLowLab   := label.new(dayStartBar, dayLow, "HL", xloc = xloc.bar_index, yloc = yloc.price, textcolor = color.new(color.teal, 0), style = label.style_label_left, size = size.tiny, color = color.new(color.black, 100))
+else
+    dayHigh := na(dayHigh) ? high : math.max(dayHigh, high)
+    dayLow  := na(dayLow)  ? low  : math.min(dayLow, low)
+    if useDayHL
+        if not na(dayHighLine)
+            line.set_xy1(dayHighLine, dayStartBar, dayHigh)
+            line.set_xy2(dayHighLine, bar_index, dayHigh)
+            label.set_y(dayHighLab, dayHigh)
+        if not na(dayLowLine)
+            line.set_xy1(dayLowLine, dayStartBar, dayLow)
+            line.set_xy2(dayLowLine, bar_index, dayLow)
+            label.set_y(dayLowLab, dayLow)
+
+//----------------------------------------------------
+// ACTUALIZAR TOQUES A NIVELES DE LIQUIDEZ
+//----------------------------------------------------
+if array.size(liqPrices) > 0
+    for iTouch = 0 to array.size(liqPrices) - 1
+        float lvlTouch = array.get(liqPrices, iTouch)
+        if math.abs(close - lvlTouch) <= atr * liqTouchTolAtr
+            int t = array.get(liqTouches, iTouch) + 1
+            array.set(liqTouches, iTouch, t)
+
+//----------------------------------------------------
+// MÉTRICAS – ARRAYS Y ACUMULADORES
+//----------------------------------------------------
+var float[] stEntryPrice = array.new_float()
+var float[] stStopPrice  = array.new_float()
+var int[]   stDir        = array.new_int()
+var int[]   stStartBar   = array.new_int()
+var float[] stBestR      = array.new_float()
+var bool[]  stHit1R      = array.new_bool()
+var bool[]  stHit2R      = array.new_bool()
+var bool[]  stHitStop    = array.new_bool()
+var bool[]  stActive     = array.new_bool()
+
+var int   gTotalSweeps = 0
+var int   gHit1R       = 0
+var int   gHit2R       = 0
+var int   gStoppedOnly = 0
+var float gSumBestR    = 0.0
+
+stats_register(int dirTrade, int sweepType, int score, bool inSession) =>
+    if useStats
+        bool scoreOK = score >= statsScoreMin
+        bool sessOK  = not statsOnlyMainSession or inSession
+        bool typeOK  = statsSweepType == "Ambos" or (statsSweepType == "Sólo SwR" and sweepType == 1) or (statsSweepType == "Sólo SwC" and sweepType == 2)
+        if scoreOK and sessOK and typeOK
+            float entry = close
+            float stop  = dirTrade == 1 ? low - atr * 0.25 : high + atr * 0.25
+            float risk  = math.abs(entry - stop)
+            if risk > 0
+                array.push(stEntryPrice, entry)
+                array.push(stStopPrice, stop)
+                array.push(stDir, dirTrade)
+                array.push(stStartBar, bar_index)
+                array.push(stBestR, 0.0)
+                array.push(stHit1R, false)
+                array.push(stHit2R, false)
+                array.push(stHitStop, false)
+                array.push(stActive, true)
+                if array.size(stEntryPrice) > maxStatsSweeps
+                    array.shift(stEntryPrice)
+                    array.shift(stStopPrice)
+                    array.shift(stDir)
+                    array.shift(stStartBar)
+                    array.shift(stBestR)
+                    array.shift(stHit1R)
+                    array.shift(stHit2R)
+                    array.shift(stHitStop)
+                    array.shift(stActive)
+
+//----------------------------------------------------
+// DETECCIÓN DE SWEEPS CON DIVERGENCIA CVD
+//----------------------------------------------------
+float wickUp      = high - math.max(open, close)
+float wickDown    = math.min(open, close) - low
+float candleRange = high - low
+
+bool passesVolFilter = not useVolFilter or (not na(volThreshold) and volume >= volThreshold)
+
+if useSweeps and candleRange > 0 and passesVolFilter and array.size(liqPrices) > 0
+    int bestIdxUp   = -1
+    int bestIdxDn   = -1
+    int bestScoreUp = -1
+    int bestScoreDn = -1
+    int bestTypeUp  = 0
+    int bestTypeDn  = 0
+
+    for i = 0 to array.size(liqPrices) - 1
+        bool already = array.get(liqUsed, i)
+        if not already
+            float lvl      = array.get(liqPrices, i)
+            int   dir      = array.get(liqDir, i)
+            int   liqScore = liq_getScore(i)
+            float refCvd   = array.get(liqRefCvd, i)
+            bool  qualLiq  = liqScore >= liqMinScoreEff
+            bool  skipBySession = useSessionFilter and onlySweepsInSessions and not inMainSession
+
+            if not skipBySession
+                bool touchedUp = dir == 1 and high > lvl
+                bool touchedDn = dir == -1 and low  < lvl
+
+                bool sweepReturnUp = touchedUp and close < lvl and wickUp / candleRange >= minWickFrac
+                bool sweepContUp   = touchedUp and close > lvl
+                bool sweepReturnDn = touchedDn and close > lvl and wickDown / candleRange >= minWickFrac
+                bool sweepContDn   = touchedDn and close < lvl
+
+                bool cvdDivUp = dir == 1 and ((cvd < refCvd) or (upPrice and downCvd))
+                bool cvdDivDn = dir == -1 and ((cvd > refCvd) or (downPrice and upCvd))
+
+                bool anySweep = ((sweepReturnUp or sweepContUp) and cvdDivUp) or ((sweepReturnDn or sweepContDn) and cvdDivDn)
+
+                if anySweep
+                    int score = 0
+                    if inMainSession
+                        score += 1
+                    if useDispFilter and dispCandle
+                        score += 1
+                    if useImbFilter and imbExtreme
+                        score += 1
+                    if qualLiq
+                        score += 1
+
+                    bool passesScore = not useSweepScore or score >= sweepScoreMinEff
+                    if passesScore
+                        if (sweepReturnUp or sweepContUp) and cvdDivUp
+                            if score > bestScoreUp
+                                bestScoreUp := score
+                                bestIdxUp := i
+                                bestTypeUp := sweepReturnUp ? 1 : 2
+                        if (sweepReturnDn or sweepContDn) and cvdDivDn
+                            if score > bestScoreDn
+                                bestScoreDn := score
+                                bestIdxDn := i
+                                bestTypeDn := sweepReturnDn ? 1 : 2
+
+    bool  outOfSession = useSessionFilter and not inMainSession
+    color baseLblColor = color.new(color.black, outOfSession and markOutSession ? 90 : 100)
+    float yHighSweep   = high + atr * offsetSweepAtr
+    float yLowSweep    = low  - atr * offsetSweepAtr
+
+    if bestIdxUp != -1
+        int    idxU  = bestIdxUp
+        int    typeU = bestTypeUp
+        int    scU   = bestScoreUp
+        string txtU  = useSweepScore ? ((typeU == 1 ? "SwR(" : "SwC(") + str.tostring(scU) + ")") : (typeU == 1 ? "SwR" : "SwC")
+        color  colU  = typeU == 1 ? swRTextColor : swCTextColor
+        label.new(bar_index, yHighSweep, txtU, xloc = xloc.bar_index, yloc = yloc.price, textcolor = colU, style = label.style_label_down, size = labelSizeSweep, color = baseLblColor)
+        array.set(liqUsed, idxU, true)
+        int dirTradeUp = typeU == 1 ? -1 : 1
+        stats_register(dirTradeUp, typeU, scU, inMainSession)
+
+    if bestIdxDn != -1
+        int    idxD  = bestIdxDn
+        int    typeD = bestTypeDn
+        int    scD   = bestScoreDn
+        string txtD  = useSweepScore ? ((typeD == 1 ? "SwR(" : "SwC(") + str.tostring(scD) + ")") : (typeD == 1 ? "SwR" : "SwC")
+        color  colD  = typeD == 1 ? swRTextColor : swCTextColor
+        label.new(bar_index, yLowSweep, txtD, xloc = xloc.bar_index, yloc = yloc.price, textcolor = colD, style = label.style_label_up, size = labelSizeSweep, color = baseLblColor)
+        array.set(liqUsed, idxD, true)
+        int dirTradeDn = typeD == 1 ? 1 : -1
+        stats_register(dirTradeDn, typeD, scD, inMainSession)
+
+//----------------------------------------------------
+// ACTUALIZAR MÉTRICAS POR BARRA
+//----------------------------------------------------
+if useStats and array.size(stEntryPrice) > 0
+    int nStats = array.size(stEntryPrice)
+    for i = 0 to nStats - 1
+        bool active = array.get(stActive, i)
+        if active
+            int   startBar = array.get(stStartBar, i)
+            int   age      = bar_index - startBar
+            if age >= 1
+                float entry = array.get(stEntryPrice, i)
+                float stop  = array.get(stStopPrice, i)
+                float risk  = math.abs(entry - stop)
+                if risk > 0
+                    int   dirTrade = array.get(stDir, i)
+                    float bestR    = array.get(stBestR, i)
+                    bool  hit1     = array.get(stHit1R, i)
+                    bool  hit2     = array.get(stHit2R, i)
+                    bool  hitStop  = array.get(stHitStop, i)
+
+                    float rBestThis  = 0.0
+                    float rWorstThis = 0.0
+                    if dirTrade == 1
+                        rBestThis  := (high - entry) / risk
+                        rWorstThis := (low - entry) / risk
+                    else
+                        rBestThis  := (entry - low) / risk
+                        rWorstThis := (entry - high) / risk
+
+                    float newBest = math.max(bestR, rBestThis)
+                    bool  newHit1 = hit1 or (newBest >= 1.0)
+                    bool  newHit2 = hit2 or (newBest >= 2.0)
+                    bool  newStop = hitStop or (rWorstThis <= -1.0)
+
+                    bool stillAlive = age < maxBarsHold and not newStop
+
+                    if stillAlive
+                        array.set(stBestR, i, newBest)
+                        array.set(stHit1R, i, newHit1)
+                        array.set(stHit2R, i, newHit2)
+                        array.set(stHitStop, i, newStop)
+                    else
+                        gTotalSweeps += 1
+                        gSumBestR += newBest
+                        if newBest >= 1.0
+                            gHit1R += 1
+                        if newBest >= 2.0
+                            gHit2R += 1
+                        if newStop and newBest < 1.0
+                            gStoppedOnly += 1
+                        array.set(stActive, i, false)
+
+//----------------------------------------------------
+// PANEL DE ESTADÍSTICAS
+//----------------------------------------------------
+var table statsTable = table.new(position.top_right, 1, 4, border_width = 1)
+
+if useStats
+    float avgR   = gTotalSweeps > 0 ? gSumBestR / gTotalSweeps : na
+    float pct1R  = gTotalSweeps > 0 ? (float(gHit1R) / gTotalSweeps) * 100.0 : na
+    float pct2R  = gTotalSweeps > 0 ? (float(gHit2R) / gTotalSweeps) * 100.0 : na
+    float pctSL  = gTotalSweeps > 0 ? (float(gStoppedOnly) / gTotalSweeps) * 100.0 : na
+
+    string line0 = "Sweeps medidos: " + str.tostring(gTotalSweeps)
+    string line1 = "≥1R: " + (na(pct1R) ? "NA" : str.tostring(pct1R, "#.0")) + "%  (" + str.tostring(gHit1R) + ")"
+    string line2 = "≥2R: " + (na(pct2R) ? "NA" : str.tostring(pct2R, "#.0")) + "%  (" + str.tostring(gHit2R) + ")"
+    string line3 = "AvgR: " + (na(avgR) ? "NA" : str.tostring(avgR, "#.2")) + "  SL<1R: " + (na(pctSL) ? "NA" : str.tostring(pctSL, "#.0")) + "%"
+
+    table.cell(statsTable, 0, 0, line0)
+    table.cell(statsTable, 0, 1, line1)
+    table.cell(statsTable, 0, 2, line2)
+    table.cell(statsTable, 0, 3, line3)
+else
+    table.cell(statsTable, 0, 0, "Métricas OFF")
+    table.cell(statsTable, 0, 1, "")
+    table.cell(statsTable, 0, 2, "")
+    table.cell(statsTable, 0, 3, "")
