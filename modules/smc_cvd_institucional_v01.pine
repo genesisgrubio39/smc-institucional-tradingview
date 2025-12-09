@@ -1,1 +1,150 @@
-faltaría agregar
+//@version=6
+indicator("SMC – CVD Institucional (Prop Desk)", overlay = false, max_lines_count = 100)
+
+//------------------------------------
+// 0. Sesión institucional (RTH)
+//------------------------------------
+string groupSesion = "Sesión institucional"
+bool useSesionRTH  = input.bool(true, "Reset por sesión RTH", group = groupSesion)
+string sesionRTH   = input.session("0930-1600", "Horario RTH", group = groupSesion)
+
+int  tRTH      = time(timeframe.period, sesionRTH)
+bool inRTH     = not na(tRTH)
+bool inicioRTH = inRTH and (na(tRTH[1]) or tRTH < tRTH[1])
+
+//------------------------------------
+// 1. Delta por barra (regla de tick)
+//------------------------------------
+var float cvd = na
+
+bool  hasPrevClose = not na(close[1])
+float deltaBarRaw  = hasPrevClose ? (close > close[1] ? volume : close < close[1] ? -volume : 0.0) : 0.0
+float deltaBar     = useSesionRTH ? (inRTH ? deltaBarRaw : 0.0) : deltaBarRaw
+
+//------------------------------------
+// 2. Reset institucional
+//------------------------------------
+bool cambioDia = dayofmonth != dayofmonth[1]
+bool condReset = useSesionRTH ? inicioRTH : cambioDia
+
+cvd := condReset or na(cvd[1]) ? deltaBar : cvd[1] + deltaBar
+
+//------------------------------------
+// 3. Lógica de estado Precio / CVD
+//------------------------------------
+string groupLogic = "Lógica de estado"
+int    lenTrend   = input.int(20, "Longitud tendencia (precio/CVD)", minval = 5, group = groupLogic)
+
+float prNow      = ta.linreg(close, lenTrend, 0)
+float prPrev     = ta.linreg(close, lenTrend, 1)
+float slopePrice = prNow - prPrev
+
+float cvdNow   = ta.linreg(cvd, lenTrend, 0)
+float cvdPrev  = ta.linreg(cvd, lenTrend, 1)
+float slopeCvd = cvdNow - cvdPrev
+
+bool upPrice   = slopePrice > 0
+bool downPrice = slopePrice < 0
+bool upCvd     = slopeCvd > 0
+bool downCvd   = slopeCvd < 0
+
+bool bullTrend = upPrice and upCvd
+bool bearTrend = downPrice and downCvd
+bool distrib   = upPrice and not upCvd
+bool acumul    = downPrice and not downCvd
+
+//------------------------------------
+// 4. Colores por estado
+//------------------------------------
+color colBull   = color.new(color.lime, 0)
+color colBear   = color.new(color.red, 0)
+color colDist   = color.new(color.orange, 0)
+color colAcum   = color.new(color.yellow, 0)
+color colNeutro = color.new(color.gray, 40)
+
+color colCvd = bullTrend ? colBull : bearTrend ? colBear : distrib ? colDist : acumul ? colAcum : colNeutro
+
+float cvdPlot = useSesionRTH ? (inRTH ? cvd : na) : cvd
+
+//------------------------------------
+// 5. Escala visual
+//------------------------------------
+string groupScale = "Escala visual"
+float escalaPlot  = input.float(1000000.0, "Dividir CVD para el plot", step = 1.0, group = groupScale)
+float cvdPlotScaled = cvdPlot / escalaPlot
+
+//------------------------------------
+// 6. CVD suavizado opcional
+//------------------------------------
+string groupSmooth = "Suavizado (solo visual)"
+bool   showSmooth  = input.bool(true, "Mostrar CVD suavizado (EMA)", group = groupSmooth)
+int    lenSmooth   = input.int(10, "Longitud EMA CVD", minval = 2, group = groupSmooth)
+
+float cvdSmoothScaled = ta.ema(cvdPlotScaled, lenSmooth)
+
+//------------------------------------
+// 7. Plots
+//------------------------------------
+plot(cvdPlotScaled, "CVD (escala)", color = colCvd, linewidth = 2)
+plot(showSmooth ? cvdSmoothScaled : na, "CVD EMA", color = color.new(color.gray, 60), linewidth = 1)
+hline(0.0, "Zero", color = color.new(color.gray, 70), linestyle = hline.style_dotted)
+
+//------------------------------------
+// 8. Función millify
+//------------------------------------
+f_millify(float x) =>
+    float a = math.abs(x)
+    string s = ""
+    if a >= 1e9
+        s := str.tostring(x / 1e9, "#.##") + "B"
+    else if a >= 1e6
+        s := str.tostring(x / 1e6, "#.##") + "M"
+    else if a >= 1e3
+        s := str.tostring(x / 1e3, "#.##") + "K"
+    else
+        s := str.tostring(x, "#")
+    s
+
+//------------------------------------
+// 9. Estado REAL (macro institucional)
+//------------------------------------
+string estadoText = bullTrend ? "Estado: Compradores dominan (tendencia)" :
+     bearTrend ? "Estado: Vendedores dominan (tendencia)" :
+     distrib   ? "Estado: Distribución (flujo no acompaña)" :
+     acumul    ? "Estado: Acumulación (flujo no acompaña)" :
+                 "Estado: Neutro / rango"
+
+color colEstado = bullTrend ? colBull : bearTrend ? colBear : distrib ? colDist : acumul ? colAcum : color.gray
+
+//------------------------------------
+// 10. Estado INMEDIATO (micro)
+//------------------------------------
+string estadoInmediato =
+     (upPrice and upCvd)     ? "Inmediato: Momentum comprador" :
+     (downPrice and downCvd) ? "Inmediato: Momentum vendedor" :
+     (upPrice and downCvd)   ? "Inmediato: Divergencia bajista" :
+     (downPrice and upCvd)   ? "Inmediato: Divergencia alcista" :
+                               "Inmediato: Micro-rango"
+
+color colInmediato =
+     (upPrice and upCvd)     ? colBull :
+     (downPrice and downCvd) ? colBear :
+     (upPrice and downCvd)   ? colDist :
+     (downPrice and upCvd)   ? colAcum : color.gray
+
+//------------------------------------
+// 11. Texto
+//------------------------------------
+string cvdValueText = "CVD: " + f_millify(cvd)
+string resetText    = useSesionRTH ? "Reset: RTH " + str.tostring(sesionRTH) : "Reset: Diario"
+
+//------------------------------------
+// 12. Tabla institucional (leyenda)
+//------------------------------------
+var table panelInfo = table.new(position.top_right, 1, 4, border_width = 0)
+
+if barstate.islast
+    table.cell(panelInfo, 0, 0, cvdValueText,    text_color = color.new(color.aqua, 0), text_size = size.normal)
+    table.cell(panelInfo, 0, 1, estadoText,      text_color = colEstado,                text_size = size.normal)
+    table.cell(panelInfo, 0, 2, estadoInmediato, text_color = colInmediato,             text_size = size.normal)
+    table.cell(panelInfo, 0, 3, resetText,       text_color = color.new(color.gray, 50), text_size = size.normal)
