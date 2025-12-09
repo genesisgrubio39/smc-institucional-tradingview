@@ -1,1 +1,295 @@
-faltaría agregar
+//@version=6
+indicator("SMC – Premium / Discount HTF (Módulo 5)", overlay = true, max_boxes_count = 40, max_lines_count = 40, max_labels_count = 40)
+
+//----------------------------------------------------
+// 0. INPUTS – CONFIGURACIÓN
+//----------------------------------------------------
+groupStruct   = "1. Estructura HTF institucional"
+groupVisual   = "2. Diseño Premium / Discount"
+groupState    = "3. Texto estado P/D"
+groupLevels   = "4. Etiquetas niveles (Equilibrio / Q1 / Q3)"
+groupZones    = "5. Etiquetas bloques (Premium / Discount)"
+
+swingLen      = input.int(5, "Swing length HTF (BOS/CHOCH aprox.)", minval = 1, group = groupStruct)
+extendBars    = input.int(30, "Extensión barras antes/después del structBar", minval = 1, group = groupStruct)
+
+premiumFrac   = input.float(0.06, "Fracción Premium del rango (0–0.5)", minval = 0.01, maxval = 0.5, step = 0.01, group = groupVisual)
+discountFrac  = input.float(0.06, "Fracción Discount del rango (0–0.5)", minval = 0.01, maxval = 0.5, step = 0.01, group = groupVisual)
+eqFrac        = input.float(0.07, "Fracción Equilibrium (alrededor del mid)", minval = 0.01, maxval = 0.5, step = 0.01, group = groupVisual)
+
+showBlocks          = input.bool(true, "Mostrar bloques Premium / Discount", group = groupVisual)
+showEqZone          = input.bool(true, "Mostrar zona Equilibrium", group = groupVisual)
+showEqLine          = input.bool(true, "Mostrar línea de Equilibrio (centro EQ)", group = groupVisual)
+showPremiumMidLine  = input.bool(true, "Mostrar línea centro Premium", group = groupVisual)
+showDiscountMidLine = input.bool(true, "Mostrar línea centro Discount", group = groupVisual)
+showQLines          = input.bool(true, "Mostrar Q1 y Q3", group = groupVisual)
+showBlockBord       = input.bool(false, "Mostrar borde de bloques", group = groupVisual)
+
+colPremium    = input.color(color.new(#2157f3, 75), "Color bloque Premium", group = groupVisual)
+colEqZone     = input.color(color.new(#f5c542, 80), "Color bloque Equilibrium", group = groupVisual)
+colDiscount   = input.color(color.new(#089981, 75), "Color bloque Discount", group = groupVisual)
+
+eqLineColor   = input.color(color.new(color.white, 0), "Color línea Equilibrio", group = groupVisual)
+eqLineStyleS  = input.string("Sólida", "Estilo línea Equilibrio", group = groupVisual, options = ["Sólida", "Punteada", "Discontinua"])
+
+q1LineColor   = input.color(color.new(color.gray, 25), "Color línea Q1", group = groupVisual)
+q3LineColor   = input.color(color.new(color.gray, 25), "Color línea Q3", group = groupVisual)
+qLineStyleS   = input.string("Punteada", "Estilo líneas Q1/Q3", group = groupVisual, options = ["Sólida", "Punteada", "Discontinua"])
+
+showState     = input.bool(true, "Mostrar estado P+/P/N/D/D+", group = groupState)
+stateMode     = input.string("Abreviado", "Modo estado P/D", options = ["Abreviado", "Completo"], group = groupState)
+stateColor    = input.color(color.new(color.white, 0), "Color texto estado", group = groupState)
+stateYOff     = input.int(0, "Offset Y estado (ticks)", minval = -200, maxval = 200, group = groupState)
+stateSizeOpt  = input.string("Normal", "Tamaño texto estado", options = ["Tiny", "Small", "Normal", "Large", "Huge"], group = groupState)
+stateSize     = stateSizeOpt == "Tiny" ? size.tiny : stateSizeOpt == "Small" ? size.small : stateSizeOpt == "Large" ? size.large : stateSizeOpt == "Huge" ? size.huge : size.normal
+
+showLevelLbls   = input.bool(true, "Mostrar etiquetas Equilibrio/Q1/Q3", group = groupLevels)
+showLevelPrices = input.bool(true, "Incluir precio en etiquetas de niveles", group = groupLevels)
+levelLblSizeS   = input.string("Small", "Tamaño texto niveles", options = ["Tiny", "Small", "Normal", "Large"], group = groupLevels)
+levelLblOffY    = input.int(0, "Offset Y niveles (ticks)", minval = -200, maxval = 200, group = groupLevels)
+levelLblSize    = levelLblSizeS == "Tiny" ? size.tiny : levelLblSizeS == "Normal" ? size.normal : levelLblSizeS == "Large" ? size.large : size.small
+
+showZoneLbls         = input.bool(true, "Mostrar etiquetas Premium/Discount", group = groupZones)
+zoneLblOffY          = input.int(15, "Separación vertical bloques (ticks)", minval = 0, maxval = 500, group = groupZones)
+zoneLblSizeS         = input.string("Large", "Tamaño texto bloques", options = ["Tiny", "Small", "Normal", "Large", "Huge"], group = groupZones)
+zoneLblSize          = zoneLblSizeS == "Tiny" ? size.tiny : zoneLblSizeS == "Small" ? size.small : zoneLblSizeS == "Normal" ? size.normal : zoneLblSizeS == "Huge" ? size.huge : size.large
+showPremiumMidPrice  = input.bool(true, "Mostrar precio centro Premium (texto)", group = groupZones)
+showDiscountMidPrice = input.bool(true, "Mostrar precio centro Discount (texto)", group = groupZones)
+
+zoneTextPremium  = color.new(colPremium, 5)
+zoneTextDiscount = color.new(colDiscount, 5)
+
+//----------------------------------------------------
+tfSec   = timeframe.in_seconds(timeframe.period)
+tf4hSec = timeframe.in_seconds("240")
+bool tfOk = tfSec >= tf4hSec
+
+var label tfWarn = na
+if not tfOk and barstate.islast
+    if na(tfWarn)
+        tfWarn := label.new(bar_index, close, "SMC – P/D HTF: usar 4H, D, W o M", xloc = xloc.bar_index, yloc = yloc.price, style = label.style_label_left, textcolor = color.red, size = size.small)
+    else
+        label.set_xy(tfWarn, bar_index, close)
+else if tfOk and not na(tfWarn)
+    label.delete(tfWarn)
+    tfWarn := na
+
+//----------------------------------------------------
+getLineStyle(string s) =>
+    s == "Punteada" ? line.style_dotted : s == "Discontinua" ? line.style_dashed : line.style_solid
+
+eqLineStyle = getLineStyle(eqLineStyleS)
+qLineStyle  = getLineStyle(qLineStyleS)
+
+//----------------------------------------------------
+// VARIABLES DE CICLO
+//----------------------------------------------------
+var float cycleLow        = na
+var float cycleHigh       = na
+var float cycleMid        = na
+var float cycleQ1         = na
+var float cycleQ3         = na
+var int   cycleStructBar  = na
+
+var box boxPremium        = na
+var box boxDiscount       = na
+var box boxEqZone         = na
+var line eqLine           = na
+var line q1Line           = na
+var line q3Line           = na
+var line premiumMidLine   = na
+var line discountMidLine  = na
+
+var label stateLbl            = na
+var label midLbl              = na
+var label q1Lbl               = na
+var label q3Lbl               = na
+var label premiumLbl          = na
+var label discountLbl         = na
+var label premiumMidPriceLbl  = na
+var label discountMidPriceLbl = na
+
+//----------------------------------------------------
+// LÓGICA PRINCIPAL SOLO SI TF >= 4H
+//----------------------------------------------------
+if tfOk
+    phValue = ta.pivothigh(high, swingLen, swingLen)
+    plValue = ta.pivotlow(low, swingLen, swingLen)
+
+    isNewPH = not na(phValue) and na(phValue[1])
+    isNewPL = not na(plValue) and na(plValue[1])
+
+    phBar = bar_index - swingLen
+    plBar = bar_index - swingLen
+
+    var float lastSwingHigh    = na
+    var int   lastSwingHighBar = na
+    var float lastSwingLow     = na
+    var int   lastSwingLowBar  = na
+
+    if isNewPH
+        lastSwingHigh    := phValue
+        lastSwingHighBar := phBar
+
+    if isNewPL
+        lastSwingLow     := plValue
+        lastSwingLowBar  := plBar
+
+    newCycle     = false
+    float newLow = na
+    float newHigh = na
+    int structBar = na
+
+    if isNewPH and not na(lastSwingLow) and lastSwingLowBar < phBar
+        newCycle := true
+        newLow   := lastSwingLow
+        newHigh  := phValue
+        structBar := phBar
+
+    if isNewPL and not na(lastSwingHigh) and lastSwingHighBar < plBar
+        newCycle := true
+        newLow   := plValue
+        newHigh  := lastSwingHigh
+        structBar := plBar
+
+    if newCycle and newHigh > newLow
+        if not na(boxPremium)
+            box.delete(boxPremium)
+        if not na(boxDiscount)
+            box.delete(boxDiscount)
+        if not na(boxEqZone)
+            box.delete(boxEqZone)
+        if not na(eqLine)
+            line.delete(eqLine)
+        if not na(q1Line)
+            line.delete(q1Line)
+        if not na(q3Line)
+            line.delete(q3Line)
+        if not na(premiumMidLine)
+            line.delete(premiumMidLine)
+        if not na(discountMidLine)
+            line.delete(discountMidLine)
+        if not na(stateLbl)
+            label.delete(stateLbl)
+        if not na(midLbl)
+            label.delete(midLbl)
+        if not na(q1Lbl)
+            label.delete(q1Lbl)
+        if not na(q3Lbl)
+            label.delete(q3Lbl)
+        if not na(premiumLbl)
+            label.delete(premiumLbl)
+        if not na(discountLbl)
+            label.delete(discountLbl)
+        if not na(premiumMidPriceLbl)
+            label.delete(premiumMidPriceLbl)
+        if not na(discountMidPriceLbl)
+            label.delete(discountMidPriceLbl)
+
+        cycleLow       := newLow
+        cycleHigh      := newHigh
+        cycleStructBar := structBar
+
+        rng = cycleHigh - cycleLow
+        cycleMid := cycleLow + rng * 0.5
+        cycleQ1  := cycleLow + rng * 0.25
+        cycleQ3  := cycleLow + rng * 0.75
+
+        startBar = math.max(0, cycleStructBar - extendBars)
+        endBar   = cycleStructBar + extendBars
+        midBar   = math.round((startBar + endBar) * 0.5)
+
+        premiumTop    = cycleHigh
+        premiumBottom = cycleHigh - rng * premiumFrac
+        premiumMid    = (premiumTop + premiumBottom) * 0.5
+
+        discountBottom = cycleLow
+        discountTop    = cycleLow + rng * discountFrac
+        discountMid    = (discountTop + discountBottom) * 0.5
+
+        eqHalfRange = rng * eqFrac * 0.5
+        eqTop       = cycleMid + eqHalfRange
+        eqBottom    = cycleMid - eqHalfRange
+
+        borderPremium  = showBlockBord ? color.new(colPremium, 0) : na
+        borderDiscount = showBlockBord ? color.new(colDiscount, 0) : na
+        borderEq       = showBlockBord ? color.new(colEqZone, 0) : na
+
+        if showBlocks
+            boxPremium  := box.new(startBar, premiumTop, endBar, premiumBottom, border_color = borderPremium, bgcolor = colPremium)
+            boxDiscount := box.new(startBar, discountTop, endBar, discountBottom, border_color = borderDiscount, bgcolor = colDiscount)
+
+        if showEqZone
+            boxEqZone := box.new(startBar, eqTop, endBar, eqBottom, border_color = borderEq, bgcolor = colEqZone)
+
+        if showEqLine
+            eqLine := line.new(startBar, cycleMid, endBar, cycleMid, extend = extend.none, color = eqLineColor, width = 1, style = eqLineStyle)
+
+        if showPremiumMidLine
+            premiumMidLine := line.new(startBar, premiumMid, endBar, premiumMid, extend = extend.none, color = color.new(colPremium, 0), width = 1, style = line.style_dotted)
+
+        if showDiscountMidLine
+            discountMidLine := line.new(startBar, discountMid, endBar, discountMid, extend = extend.none, color = color.new(colDiscount, 0), width = 1, style = line.style_dotted)
+
+        if showQLines
+            q1Line := line.new(startBar, cycleQ1, endBar, cycleQ1, extend = extend.none, color = q1LineColor, width = 1, style = qLineStyle)
+            q3Line := line.new(startBar, cycleQ3, endBar, cycleQ3, extend = extend.none, color = q3LineColor, width = 1, style = qLineStyle)
+
+        if showLevelLbls
+            labelXLevels = endBar
+            offLevels  = levelLblOffY * syminfo.mintick
+            bgTrLevels = color.new(color.black, 100)
+
+            midTxt = showLevelPrices ? "Equilibrio " + str.tostring(cycleMid, format.mintick) : "Equilibrio"
+            q1Txt  = showLevelPrices ? "Q1 " + str.tostring(cycleQ1, format.mintick) : "Q1"
+            q3Txt  = showLevelPrices ? "Q3 " + str.tostring(cycleQ3, format.mintick) : "Q3"
+
+            midLbl := label.new(labelXLevels, cycleMid + offLevels, midTxt, xloc = xloc.bar_index, yloc = yloc.price, style = label.style_label_left, color = bgTrLevels, textcolor = eqLineColor, size = levelLblSize)
+            q1Lbl  := label.new(labelXLevels, cycleQ1 + offLevels, q1Txt, xloc = xloc.bar_index, yloc = yloc.price, style = label.style_label_left, color = bgTrLevels, textcolor = q1LineColor, size = levelLblSize)
+            q3Lbl  := label.new(labelXLevels, cycleQ3 + offLevels, q3Txt, xloc = xloc.bar_index, yloc = yloc.price, style = label.style_label_left, color = bgTrLevels, textcolor = q3LineColor, size = levelLblSize)
+
+        if showZoneLbls
+            offZones = zoneLblOffY * syminfo.mintick
+            bgTrZones = color.new(color.black, 100)
+            premiumLbl := label.new(midBar, premiumTop + offZones, "Premium", xloc = xloc.bar_index, yloc = yloc.price, style = label.style_label_center, color = bgTrZones, textcolor = zoneTextPremium, size = zoneLblSize)
+            discountLbl := label.new(midBar, discountBottom - offZones, "Discount", xloc = xloc.bar_index, yloc = yloc.price, style = label.style_label_center, color = bgTrZones, textcolor = zoneTextDiscount, size = zoneLblSize)
+
+        if showPremiumMidPrice
+            bgTrPrice = color.new(color.black, 100)
+            premPriceTxt = str.tostring(premiumMid, format.mintick)
+            premiumMidPriceLbl := label.new(endBar, premiumMid, premPriceTxt, xloc = xloc.bar_index, yloc = yloc.price, style = label.style_label_left, color = bgTrPrice, textcolor = zoneTextPremium, size = levelLblSize)
+
+        if showDiscountMidPrice
+            bgTrPriceD = color.new(color.black, 100)
+            discPriceTxt = str.tostring(discountMid, format.mintick)
+            discountMidPriceLbl := label.new(endBar, discountMid, discPriceTxt, xloc = xloc.bar_index, yloc = yloc.price, style = label.style_label_left, color = bgTrPriceD, textcolor = zoneTextDiscount, size = levelLblSize)
+
+//----------------------------------------------------
+// ESTADO P+/P/N/D/D+
+//----------------------------------------------------
+string stateText = ""
+haveCycle = tfOk and not na(cycleMid) and not na(cycleQ1) and not na(cycleQ3)
+
+if haveCycle
+    c = close
+    string s = ""
+    if c > cycleQ3
+        s := stateMode == "Abreviado" ? "P+" : "Premium Extremo"
+    else if c > cycleMid and c <= cycleQ3
+        s := stateMode == "Abreviado" ? "P" : "Premium"
+    else if c < cycleQ1
+        s := stateMode == "Abreviado" ? "D+" : "Discount Extremo"
+    else if c >= cycleQ1 and c <= cycleMid
+        s := stateMode == "Abreviado" ? "D" : "Discount"
+    else
+        s := stateMode == "Abreviado" ? "N" : "Equilibrio"
+    stateText := s
+
+//----------------------------------------------------
+// ETIQUETA ESTADO
+//----------------------------------------------------
+if showState and barstate.islast and haveCycle
+    if not na(stateLbl)
+        label.delete(stateLbl)
+    bgTrState = color.new(color.black, 100)
+    stateLbl := label.new(bar_index, close + stateYOff * syminfo.mintick, stateText, xloc = xloc.bar_index, yloc = yloc.price, style = label.style_label_left, color = bgTrState, textcolor = stateColor, size = stateSize)
